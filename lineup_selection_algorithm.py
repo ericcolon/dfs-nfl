@@ -189,6 +189,10 @@ def get_team_con_dict(team):
             team_dict[team[key]] = [key]
     return team_dict
 
+class InfiniteLoopException(Exception):
+    def __init__(self, message, errors):
+        super().__init__(message)
+
 def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
                      max_good_player_allocation = 1,
                      max_bad_player_allocation = 1,
@@ -197,6 +201,7 @@ def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
         raise ValueError(f'Length of qb_list ({len(qb_list)}) cannot exceed '+\
                          f'n_lineups ({n_lineups})')
     lineups = []
+    player_set_ids = {}
     #alls short for allocations
     good_player_alls = {}
     bad_player_alls = {}
@@ -208,30 +213,40 @@ def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
             #do stuff with stack
         else:
             new_player_df = update_player_df(player_df, exclude_list)
+            ps_id = get_player_set_id(new_player_df)
+            
+            too_many_loops_counter = 0
+            while ps_id in player_set_ids:
+                too_many_loops_counter += 1
+                if too_many_loops_counter > n_lineups:
+                    raise InfiniteLoopException('Infinite Loop Bug')
+                if player_set_ids[ps_id]['next_psid'] is not None:
+                    ps_id = player_set_ids[ps_id]['next_psid']
+                else:
+                    exclude_list = exclude_player(exclude_list,
+                                            player_set_ids[ps_id]['lineup'])
+                    new_player_df = update_player_df(player_df, exclude_list)
+                    new_ps_id = get_player_set_id(new_player_df)
+                    player_set_ids[ps_id]['next_psid'] = new_ps_id
+                    ps_id = new_ps_id
             lineup = optimal_lineup(new_player_df)
-            while lineup in lineups:
-                exclude_list = exclude_worst_value_player(exclude_list,
-                                                          lineup)
-                new_player_df = update_player_df(player_df, exclude_list)
-                lineup = optimal_lineup(new_player_df)
-                
             good_player_alls = set_alls_from_lineup(good_player_alls,
                                                     lineup,'good')
             bad_player_alls = set_alls_from_lineup(bad_player_alls,
                                                    lineup,'bad')
-            excluded_players = len(exclude_list)
-            exclude_list = new_exclude_list(good_player_alls,
-                                            bad_player_alls,
-                                            max_good_player_allocation,
-                                            max_bad_player_allocation,
-                                            n_lineups)
-            #check if player added to exclude list
-            if len(exclude_list) == excluded_players:
-                #no player added, so need to add one for one iteration
-                exclude_list = exclude_worst_value_player(exclude_list,
-                                                          lineup)
             lineups.append(lineup)
+            player_set_ids[ps_id] = {'lineup':lineup,
+                                     'next_psid':None
+                                     }
     return lineups
+
+def get_player_set_id(player_df):
+    n = 0
+    player_id_checksum = 0
+    for index, row in player_df.iterrows():
+        n += 1
+        player_id_checksum += row['Player_ID']
+    return (n, player_id_checksum,)
 
 def pretty_print_lineup(lineup):
     for player in lineup['players']:
@@ -271,6 +286,9 @@ def pretty_print_lineup(lineup):
                   str(player['dk_salary']))
     print(f'Expected Lineup Score = {lineup["expected_lineup_score"]}')
 
+def pretty_print_psid(psids):
+    for key in psids:
+        print(key,'->',psids[key]['next_psid'])
 
 def set_alls_from_lineup(player_allocations, lineup, player_type,
                          good_player_salary = 4500):
@@ -313,7 +331,8 @@ def update_player_df(player_df, exclude_list):
         new_player_df = new_player_df[new_player_df.Player_ID != player_id]
     return new_player_df
 
-def exclude_worst_value_player(exclude_list, lineup):
+def exclude_player(exclude_list, lineup):
+	#this excludes the worst value player from the lineup
     min_player_value = 1
     for player in lineup['players']:
         if player['x_pts'] / player['dk_salary'] < min_player_value:
@@ -337,7 +356,7 @@ def main():
     stack_num = 2
     lineup_num = '19'
     #print(players)
-    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=7,
+    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=20,
                                max_good_player_allocation=1,
                                max_bad_player_allocation=1)
     for lineup in lineups:
