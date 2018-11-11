@@ -233,11 +233,11 @@ def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
             bad_player_alls = set_alls_from_lineup(bad_player_alls,
                                                    lineup,'bad')
             #TROUBLE WITH THIS CAUSING INFINITE LOOP
-##            exclude_list = new_exclude_list(good_player_alls,
-##                                            bad_player_alls,
-##                                            max_good_player_allocation,
-##                                            max_bad_player_allocation,
-##                                            n_lineups)
+            exclude_list = new_exclude_list(exclude_list, good_player_alls,
+                                            bad_player_alls,
+                                            max_good_player_allocation,
+                                            max_bad_player_allocation,
+                                            n_lineups)
             ###
             lineups.append(lineup)
             player_set_ids[ps_id] = {'lineup':lineup,
@@ -246,18 +246,24 @@ def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
         else:
             new_player_df = update_player_df(player_df, exclude_list)
             ps_id = get_player_set_id(new_player_df)
+            print(lineup_index, ': ', ps_id)
             
             too_many_loops_counter = 0
             #ensure unique lineup
             while ps_id in player_set_ids:
                 too_many_loops_counter += 1
                 if too_many_loops_counter > n_lineups:
+                    print(exclude_list)
+                    pretty_print_psid(player_set_ids)
                     raise InfiniteLoopException('Infinite Loop Bug!')
+                #print(ps_id,' -> ',player_set_ids[ps_id]['next_psid'])
                 if player_set_ids[ps_id]['next_psid'] is not None:
                     ps_id = player_set_ids[ps_id]['next_psid']
                 else:
+                    print('ex list bef: ',exclude_list)
                     exclude_list = exclude_player(exclude_list,
                                             player_set_ids[ps_id]['lineup'])
+                    print('ex list aft: ',exclude_list)
                     new_player_df = update_player_df(player_df, exclude_list)
                     new_ps_id = get_player_set_id(new_player_df)
                     player_set_ids[ps_id]['next_psid'] = new_ps_id
@@ -268,16 +274,19 @@ def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
             bad_player_alls = set_alls_from_lineup(bad_player_alls,
                                                    lineup,'bad')
             #TROUBLE WITH THIS CAUSING INFINITE LOOP
-##            exclude_list = new_exclude_list(good_player_alls,
-##                                            bad_player_alls,
-##                                            max_good_player_allocation,
-##                                            max_bad_player_allocation,
-##                                            n_lineups)
+            exclude_list = new_exclude_list(exclude_list, good_player_alls,
+                                            bad_player_alls,
+                                            max_good_player_allocation,
+                                            max_bad_player_allocation,
+                                            n_lineups)
             ###
             lineups.append(lineup)
             player_set_ids[ps_id] = {'lineup':lineup,
                                      'next_psid':None
                                      }
+            print(exclude_list)
+            pretty_print_psid(player_set_ids)
+            print('-------------------')
     return lineups
 
 def get_player_set_id(player_df):
@@ -352,18 +361,17 @@ def set_alls_from_lineup(player_allocations, lineup, player_type,
                     player_allocations[player['player_id']] = 1
     return player_allocations
 
-def new_exclude_list(good_player_alls, bad_player_alls,
+def new_exclude_list(new_exclude_list, good_player_alls, bad_player_alls,
                      max_good_player_allocation,
                      max_bad_player_allocation,
                      n_lineups):
-    exclude_list = []
     for player, allocation in good_player_alls.items():
         if allocation / n_lineups >= max_good_player_allocation:
-            exclude_list.append(player)
+            new_exclude_list.append(player)
     for player, allocation in bad_player_alls.items():
         if allocation / n_lineups >= max_bad_player_allocation:
-            exclude_list.append(player)
-    return exclude_list
+            new_exclude_list.append(player)
+    return new_exclude_list
 
 def update_player_df(player_df, exclude_list):
     new_player_df = player_df.copy()
@@ -400,7 +408,8 @@ def lineup_analytics(lineups):
                 players[player['player_name']] = 1
             else:
                 players[player['player_name']] += 1
-    pprint(players)
+    for key, value in sorted(players.items(), key=lambda x: x[1]): 
+        print("{} : {}".format(key, value))
 
 def main():
     server, database, uid, pwd = get_db_connection_items('database.prop')
@@ -418,13 +427,13 @@ def main():
     lineup_num = '19'
     #print(players)
     start = time.time()
-    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=15,
-                               max_good_player_allocation=1,
-                               max_bad_player_allocation=0.25)
-##    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=45,
+##    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=10,
 ##                               max_good_player_allocation=1,
-##                               max_bad_player_allocation=0.25,
-##                               qb_list=[744,1003])
+##                               max_bad_player_allocation=0.3)
+    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=45,
+                               max_good_player_allocation=.5,
+                               max_bad_player_allocation=0.25,
+                               qb_list=[744,1003])
     end = time.time()
     print(end - start)
     for lineup in lineups:
