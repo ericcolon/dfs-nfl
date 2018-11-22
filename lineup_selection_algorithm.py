@@ -41,7 +41,8 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                    wr_max_con = 4, wr_min_con = 3, te_max_con = 2,
                    te_min_con = 1, total_players_con = 9, qb_id = None,
                    stack_num = 0, one_team_con = False, two_team_con = False,
-                   lineup_num = 0, exclude_list = []):
+                   lineup_num = 0, exclude_list = [], locked_players = [],
+                   maximum_score = None):
     players = [row['Player_ID'] for index, row in player_df.iterrows()
                if row['Player_ID']]
     positions = get_column_dict(player_df,'Position')
@@ -131,11 +132,23 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                           if player in team_con_dict[team_key]]) <= 2,\
                           f'Max Two Players From {team_key} Constraint'
 
+    if len(locked_players) > 0:
+        for locked_player in locked_players:
+            prob += lpSum([player_vars[player]
+                           for player in players
+                           if player == locked_player]) == 1, \
+                           f'Must include {player_name[locked_player]}'+\
+                           'Constraint'
+
+    if maximum_score is not None:
+        prob += lpSum([x_points[player]*player_vars[player]
+                       for player in players]) <= maximum_score - 0.01, \
+                       'Multiple lineup constraint'
+
     prob.writeLP('LineupOptimizationModel.lp')
     prob.solve()
 
     players = []
-##    print('Status: ',LpStatus[prob.status])
     real_score = 0
 
     qb_score = 0
@@ -147,12 +160,6 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                         'x_pts':x_points[qb_id],
                         'dk_salary':salaries[qb_id],
                         'dk_id':dk_ids[qb_id]})
-##        print(player_name[qb_id].ljust(20),
-##              positions[qb_id].ljust(3),
-##              team[qb_id].ljust(5),
-##              str(x_points[qb_id]).ljust(6),
-##              str(salaries[qb_id]).ljust(6),
-##              lineup_num)
         qb_score = x_points[qb_id]
     for v in prob.variables():
         if v.varValue == 1:
@@ -164,18 +171,7 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                             'x_pts':x_points[player_id],
                             'dk_salary':salaries[player_id],
                             'dk_id':dk_ids[player_id]})
-##            print(player_name[player_id].ljust(20),
-##                  positions[player_id].ljust(3),
-##                  team[player_id].ljust(5),
-##                  str(x_points[player_id]).ljust(6),
-##                  str(salaries[player_id]).ljust(6),
-##                  lineup_num)
             real_score += real_points[player_id]
-        #print(v.name,'=',v.varValue)
-
-##    print("Expected Lineup Score = ", value(prob.objective)+qb_score)
-##    print("Actual Lineup Score = ",real_score)
-    #pprint.pprint(player_name)
     return {'players':players,
             'expected_lineup_score':value(prob.objective)+qb_score}
 
@@ -195,99 +191,55 @@ def get_team_con_dict(team):
     return team_dict
 
 def generate_lineups(week, year, player_df, n_lineups = 1, qb_list = [],
+                     locked_players = [],
                      max_good_player_allocation = 1,
                      max_bad_player_allocation = 1,
                      max_defense_allocation = 1):
-    if len(qb_list) > n_lineups:
-        raise ValueError(f'Length of qb_list ({len(qb_list)}) cannot exceed '+\
-                         f'n_lineups ({n_lineups})')
-    lineups = []
-    player_set_ids = {}
-    #alls short for allocations
-    good_player_alls = {}
-    bad_player_alls = {}
-    defense_alls = {}
-    exclude_list = []
-    qbs = len(qb_list)
-    for lineup_index in range(n_lineups):
-        if qbs > 0:
-            qb_index = lineup_index % qbs
-            new_player_df = update_player_df(player_df, exclude_list)
-            ps_id = get_player_set_id(new_player_df)
-            too_many_loops_counter = 0
-            #ensure unique lineup
-            while ps_id in player_set_ids:
-                too_many_loops_counter += 1
-                if too_many_loops_counter > n_lineups:
-                    raise InfiniteLoopException('Infinite Loop Bug!')
-                if player_set_ids[ps_id]['next_psid'] is not None:
-                    ps_id = player_set_ids[ps_id]['next_psid']
-                else:
-                    exclude_list = exclude_player(exclude_list,
-                                            player_set_ids[ps_id]['lineup'],
-                                                  qb = True)
-                    new_player_df = update_player_df(player_df, exclude_list)
-                    new_ps_id = get_player_set_id(new_player_df)
-                    player_set_ids[ps_id]['next_psid'] = new_ps_id
-                    ps_id = new_ps_id
-            
-            lineup = optimal_lineup(new_player_df, qb_id = qb_list[qb_index],
-                                    stack_num = 2)
-            good_player_alls = set_alls_from_lineup(good_player_alls,
-                                                    lineup,'good',
-                                                    qb = True)
-            bad_player_alls = set_alls_from_lineup(bad_player_alls,
-                                                   lineup,'bad',
-                                                   qb = True)
-            defense_alls = set_alls_from_lineup(defense_alls,
-                                                lineup,'defense',
-                                                qb = True)
-            exclude_list = new_exclude_list(exclude_list, good_player_alls,
-                                            bad_player_alls, defense_alls,
-                                            max_good_player_allocation,
-                                            max_bad_player_allocation,
-                                            max_defense_allocation,
-                                            n_lineups)
-            lineups.append(lineup)
-            player_set_ids[ps_id] = {'lineup':lineup,
-                                     'next_psid':None
-                                     }
+
+    #going to have some issues with max score when using different qb stacks
+    lineup_list = []
+    optimal_scores = []
+    for _ in range(n_lineups):
+        if len(optimal_scores) > 0:
+            maximum_score = min(optimal_scores)
         else:
-            new_player_df = update_player_df(player_df, exclude_list)
-            ps_id = get_player_set_id(new_player_df)
-            
-            too_many_loops_counter = 0
-            #ensure unique lineup
-            while ps_id in player_set_ids:
-                too_many_loops_counter += 1
-                if too_many_loops_counter > n_lineups:
-                    pretty_print_psid(player_set_ids)
-                    raise InfiniteLoopException('Infinite Loop Bug!')
-                #print(ps_id,' -> ',player_set_ids[ps_id]['next_psid'])
-                if player_set_ids[ps_id]['next_psid'] is not None:
-                    ps_id = player_set_ids[ps_id]['next_psid']
-                else:
-                    exclude_list = exclude_player(exclude_list,
-                                            player_set_ids[ps_id]['lineup'])
-                    new_player_df = update_player_df(player_df, exclude_list)
-                    new_ps_id = get_player_set_id(new_player_df)
-                    player_set_ids[ps_id]['next_psid'] = new_ps_id
-                    ps_id = new_ps_id
-            lineup = optimal_lineup(new_player_df)
-            good_player_alls = set_alls_from_lineup(good_player_alls,
-                                                    lineup,'good')
-            bad_player_alls = set_alls_from_lineup(bad_player_alls,
-                                                   lineup,'bad')
-            exclude_list = new_exclude_list(exclude_list, good_player_alls,
-                                            bad_player_alls,
-                                            max_good_player_allocation,
-                                            max_bad_player_allocation,
-                                            n_lineups)
-            lineups.append(lineup)
-            player_set_ids[ps_id] = {'lineup':lineup,
-                                     'next_psid':None
-                                     }
-    return lineups
+            maximum_score = None
+        lineup = optimal_lineup(player_df, maximum_score = maximum_score)
+        optimal_scores.append(lineup['expected_lineup_score'])
+        lineup_list.append(lineup)
+
+    return lineup_list
+
+def update_player_df(player_df, exclude_list):
+    new_player_df = player_df.copy()
+    for player_id in exclude_list:
+        new_player_df = new_player_df[new_player_df.Player_ID != player_id]
+    return new_player_df
+    
+def get_player_df_id_tuple(player_df):
+    player_id_tuple = ()
+    for index, row in player_df.iterrows():
+        player_id_tuple += (row['Player_ID'],)
+    return player_id_tuple
+
+def get_worst_value_from_lineup(lineup):
+    min_player_value = 1
+    for player in lineup['players']:
+        if player['x_pts'] / player['dk_salary'] < min_player_value:
+            min_player_value = player['x_pts'] / player['dk_salary']
+            player_id_to_exclude = player['player_id']
+    return player_id_to_exclude
+
+def get_worst_pts_from_lineup(lineup, locked_players):
+    min_player_points = 100
+    gen = (player for player in lineup['players']
+           if player['position'] != 'DST'
+           and player['player_id'] not in locked_players)
+    for player in gen:
+        if player['x_pts'] < min_player_points:
+            min_player_points = player['x_pts']
+            player_id_to_exclude = player['player_id']
+    return player_id_to_exclude
 
 def get_player_set_id(player_df):
     n = 0
@@ -387,11 +339,7 @@ def new_exclude_list(new_exclude_list, good_player_alls, bad_player_alls,
             new_exclude_list.append(player)
     return new_exclude_list
 
-def update_player_df(player_df, exclude_list):
-    new_player_df = player_df.copy()
-    for player_id in exclude_list:
-        new_player_df = new_player_df[new_player_df.Player_ID != player_id]
-    return new_player_df
+
 
 def exclude_player(exclude_list, lineup,qb = False):
     #this excludes the worst value player from the lineup
@@ -407,6 +355,8 @@ def exclude_player(exclude_list, lineup,qb = False):
         if qb == True:
             if (player['team'] == qb_team):
                 continue
+        if player['position'] == 'TE':
+            continue
         if player['x_pts'] / player['dk_salary'] < min_player_value:
             min_player_value = player['x_pts'] / player['dk_salary']
             player_id_to_exclude = player['player_id']
@@ -430,10 +380,9 @@ def write_lineups_to_csv(week, year, lineups):
         week_str = '0' + str(week)
     else:
         week_str = str(week)
-    with open(f'lineups_{year}{week_str}.csv','w') as fo:
+    with open(f'lineups_{year}{week_str}.csv','a') as fo:
         for lineup in lineups:
             pretty_print_lineup(lineup)
-            print('--------------------')
             fo.write(lineup_csv_string(lineup))
 
 def lineup_csv_string(lineup):
@@ -470,7 +419,7 @@ def lineup_csv_string(lineup):
     for player in lineup['players']:
         if player['position'] == 'DST':
             lineup_string += str(player['dk_id'])+','
-    return lineup_string[:-1]+'\n'
+    return lineup_string[:-1]+',,\n'
     
 
 def main():
@@ -480,36 +429,20 @@ def main():
                         "Trusted_Connection=no;"+\
                         f"uid={uid};pwd={pwd}"
     YEAR = 2018
-    WEEK = 10
+    WEEK = 11
     
     db_conn = get_sql_connection(CONNECTION_STRING)
     players = get_player_set(YEAR, WEEK, db_conn)
-    qb_id = 872
-    stack_num = 2
-    lineup_num = '19'
     #print(players)
     start = time.time()
-##    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=10,
-##                               max_good_player_allocation=1,
-##                               max_bad_player_allocation=0.3)
-    lineups = generate_lineups(WEEK,YEAR,players,n_lineups=45,
-                               max_good_player_allocation=.667,
-                               max_bad_player_allocation=0.289,
-                               max_defense_allocation=0.5,
-                               qb_list=[744,430,1040,273,1003,
-                                        1020,130,379])
+    lineups = generate_lineups(WEEK, YEAR, players, n_lineups = 5)
     end = time.time()
     print(end - start)
     for lineup in lineups:
-        continue
         pretty_print_lineup(lineup)
-    lineup_analytics(lineups)
-    write_lineups_to_csv(WEEK, YEAR, lineups)
-    #optimal_lineup(players,def_con=0,total_players_con=8)
-##    optimal_lineup(players,qb_id=qb_id,stack_num=stack_num,
-##                   lineup_num=lineup_num)
+
     db_conn.close()
-    #generate_lineups(WEEK, YEAR, [], qb_list = [1,2])
+
 
 if __name__ == "__main__":
     main()
