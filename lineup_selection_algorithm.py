@@ -16,7 +16,7 @@ pd.set_option('display.width',None)
       
 def get_sql_connection(connection_string):
     try:
-        cnxn = pyodbc.connect(connection_string)
+        cnxn = pyodbc.connect(connection_string, autocommit=True)
     except Exception as e:
         print(e)
         return None
@@ -52,7 +52,7 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                    wr_max_con = 4, wr_min_con = 3, te_max_con = 2,
                    te_min_con = 1, total_players_con = 9, qb_id = None,
                    stack_num = 0, one_team_con = False, two_team_con = False,
-                   three_team_con = False,lineup_num = 0,
+                   three_team_con = False, lineup_num = 0,
                    locked_players = [], maximum_score = None):
     players = [row['Player_ID'] for index, row in player_df.iterrows()
                if row['Player_ID']]
@@ -180,10 +180,12 @@ def optimal_lineup(player_df, salary_con = 50000, qb_con = 1,
                             'team':team[player_id],
                             'x_pts':x_points[player_id],
                             'dk_salary':salaries[player_id],
-                            'dk_id':dk_ids[player_id]})
+                            'dk_id':dk_ids[player_id],
+                            'real_points':real_points[player_id]})
             real_score += real_points[player_id]
     return {'players':players,
-            'expected_lineup_score':value(prob.objective)+qb_score}
+            'expected_lineup_score':value(prob.objective)+qb_score
+            ,'actual_lineup_score':real_score}
 
 def get_column_dict(player_df, column):
     column_dict = {}
@@ -301,6 +303,7 @@ def pretty_print_lineup(lineup):
                   str(player['x_pts']).ljust(6),
                   str(player['dk_salary']))
     print(f'Expected Lineup Score = {lineup["expected_lineup_score"]}')
+    print(f'Actual Lineup Score = {lineup["actual_lineup_score"]}')
 
 def pretty_print_lineup_excel(lineup):
     for player in lineup['players']:
@@ -349,7 +352,7 @@ def lineup_analytics(lineups):
             else:
                 players[player['player_name']] += 1
     for key, value in sorted(players.items(), key=lambda x: x[1]): 
-        print("{} : {}".format(key, value))
+        print("{}: {}".format(key, value))
 
 def write_lineups_to_dk_csv(week, year, lineups):
     if week < 10:
@@ -403,6 +406,7 @@ def write_lineups_to_csv(week, year, lineups):
     else:
         week_str = str(week)
     with open(f'lineups_{year}{week_str}.csv','a') as fo:
+        print('Writing lineups to CSV')
         fo.write('Position,Player,Team,xPts,Salary,Count\n')
         for lineup in lineups:
             fo.write(lineup_csv_string(lineup))
@@ -474,8 +478,55 @@ def lineup_csv_string(lineup):
                              str(player['x_pts'])+','+\
                              str(player['dk_salary'])+',1\n'
     return lineup_string
+
+def show_max_lineup(lineups):
+    max_lineup_score = 0
+    for lineup in lineups:
+        if lineup['actual_lineup_score'] > max_lineup_score:
+            max_lineup_score = lineup['actual_lineup_score']
+            max_lineup = lineup
+    pretty_print_lineup(max_lineup)
+
+def get_locked_players_list(players):
+    locked_list = []
+    #get top 5 QBs
+    qbs = players.loc[players['Position']
+                == 'QB'].nlargest(10,'xDK_Points')['Player_ID'].tolist()
+##    qbs = players.loc[players['Position']
+##                == 'QB'].nlargest(5,'AVG_DK_Points')['Player_ID'].tolist()
     
-    
+    #get top 2 receivers for QB
+    for qb in qbs:
+        team = players.loc[players['Player_ID'] == qb]['Team_Abbr'].max()
+        wrs = players.loc[players['Position']
+                          == 'WR'].loc[players['Team_Abbr'] == team]
+        tes = players.loc[players['Position']
+                          == 'TE'].loc[players['Team_Abbr'] == team]
+        receivers = pd.concat([wrs,tes]).nlargest(
+            2,'xDK_Points')['Player_ID'].tolist()
+        for receiver in receivers:
+            locked_list.append([qb,receiver])
+    return locked_list
+        
+def load_lineups_to_sql(week, year, lineups, db_conn):
+    sql_string = "INSERT INTO DK_CDG7_Lineups (Week, Year, "+\
+                 "Lineup_Number, Player, Position, Team, DK_Salary, "+\
+                 "xDK_Points, Player_ID) VALUES (?,?,?,?,?,?,?,?,?)"
+    params = []
+    for n, lineup in enumerate(lineups, start=1):
+        for player in lineup['players']:
+            params.append((week, year, n, player['player_name'],
+                           player['position'], player['team'],
+                           player['dk_salary'], player['x_pts'],
+                           player['player_id'],))
+    cursor = db_conn.cursor()
+    cursor.fast_executemany = True
+    print('Loading lineups to SQL')
+    try:
+        cursor.executemany(sql_string, params)
+    except Exception as e:
+        print(e)
+    cursor.close()
 
 def main():
     server, database, uid, pwd = get_db_connection_items('database.prop')
@@ -484,127 +535,41 @@ def main():
                         "Trusted_Connection=no;"+\
                         f"uid={uid};pwd={pwd}"
     YEAR = 2018
-    WEEK = 12
+    WEEK = 9
     
     db_conn = get_sql_connection(CONNECTION_STRING)
-    #print(players)
-    start = time.time()
-    lineups = []
-    
-    #Luck, Hilton
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [733,554]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 10,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .25,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Rivers, Allen
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [1003,23]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 10,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Wentz, Ertz
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [1270,356]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 7,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Wentz, Jeffrey
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [1270,607]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 3,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Roethlisberger, Brown
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [1024,142]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 7,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Roethlisberger, Smith-Schuster
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [1024,1101]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 3,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Newton, Funchess
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [872,405]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 5,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
-    #Newton, Moore
-    players = get_player_set(YEAR, WEEK, db_conn)
-    locked_players = [872,1385]
-    lineups += generate_lineups(WEEK, YEAR, players, n_lineups = 4,
-                               max_great_player_allocation = .6,
-                               max_above_avg_player_allocation = .4,
-                               max_below_avg_player_allocation = .2,
-                               max_defense_allocation = .3,
-                               locked_players = locked_players)
 
-    '''
-#lineup adjustments
-    salary_con = 50000-2900
-    qb_con = 1
-    def_con = 0
-    rb_max_con = 3
-    rb_min_con = 2
-    wr_max_con = 4
-    wr_min_con = 3
-    te_max_con = 2
-    te_min_con = 1
-    total_players_con = 8
-    
-    rb_used = 1
-    wr_used = 2
-    te_used = 1
-    salary_used = 5300+4400+4000+4700
-    
-    rb_max_con -= rb_used
-    rb_min_con -= rb_used
-    wr_max_con -= wr_used
-    wr_min_con -= wr_used
-    te_max_con -= te_used
-    te_min_con -= te_used
-    total_players_con -= rb_used + wr_used + te_used
-    salary_con -= salary_used
-    lineup = optimal_lineup(players, salary_con=salary_con, qb_con=qb_con,
-                             def_con=def_con,rb_max_con=rb_max_con,
-                             rb_min_con=rb_min_con,wr_max_con=wr_max_con,
-                             wr_min_con=wr_min_con,te_max_con=te_max_con,
-                             te_min_con=te_min_con,
-                             total_players_con=total_players_con)
-                             '''
-                             
-    end = time.time()
-    print(end - start)
-    #pretty_print_lineup(lineup)
-##    for lineup in lineups:
-##        pretty_print_lineup(lineup)
-    write_lineups_to_dk_csv(WEEK, YEAR, lineups)
-    write_lineups_to_csv(WEEK, YEAR, lineups)
+    for WEEK in range(9,13):
+        players = get_player_set(YEAR, WEEK, db_conn)
+        start = time.time()
+        locked_players_list = get_locked_players_list(players)
+
+        lineups = []
+        for locked_players in locked_players_list:
+            player_df = players.copy()
+            lineups += generate_lineups(WEEK, YEAR, player_df, n_lineups = 15,
+                                        locked_players = locked_players,
+                         max_great_player_allocation = .50,
+                         max_above_avg_player_allocation = .25,
+                         max_below_avg_player_allocation = .25,
+                         max_defense_allocation = .25
+                                        )
+        #lineup_to_sort_on = 'actual_lineup_score'
+    ##    sorted_lineups = sorted(lineups,
+    ##                            key=lambda k: k[lineup_to_sort_on],
+    ##                            reverse=True)
+    ##    sorted_lineups = [lineup for lineup in sorted_lineups
+    ##                      if lineup['actual_lineup_score'] > 168.62]
+    ##    
+        end = time.time()
+        print(f'Time: {end - start}')
+        #show_max_lineup(lineups)
+        #pretty_print_lineup(lineup)
+    ##    for lineup in sorted_lineups:
+        #for lineup in lineups:
+            #pretty_print_lineup(lineup)
+        load_lineups_to_sql(WEEK, YEAR, lineups, db_conn)
+
     #lineup_analytics(lineups)
 
     db_conn.close()
